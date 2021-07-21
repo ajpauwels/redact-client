@@ -14,6 +14,8 @@ use warp::{Filter, Rejection, Reply};
 use warp_sessions::{
     self, CookieOptions, SameSiteCookieOption, Session, SessionStore, SessionWithStore,
 };
+use regex::Regex;
+use percent_encoding::percent_decode_str;
 
 #[derive(Deserialize, Serialize)]
 struct WithoutTokenQueryParams {
@@ -21,6 +23,7 @@ struct WithoutTokenQueryParams {
     edit: Option<bool>,
     data_type: Option<String>,
     relay_url: Option<String>,
+    js_message: Option<String>
 }
 
 #[derive(Deserialize, Serialize)]
@@ -34,6 +37,7 @@ struct WithTokenQueryParams {
     edit: Option<bool>,
     data_type: Option<String>,
     relay_url: Option<String>,
+    js_message: Option<String>
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -71,6 +75,20 @@ pub fn without_token<S: SessionStore, R: Renderer, T: TokenGenerator>(
                   session_with_store: SessionWithStore<S>,
                   token: String,
                   render_engine: R| async move {
+
+
+                let sanitized_message = query_params.js_message.and_then(|message| {
+                    let decoded_param = percent_decode_str(&message.clone())
+                        .decode_utf8()
+                        .unwrap_or_default()
+                        .to_string();
+                    let base64_regex = Regex::new(r"^[A-Za-z0-9+/]+={0,2}$").unwrap();
+                    match base64_regex.is_match(&decoded_param) {
+                        true => Some(message),
+                        false => None
+                    }
+                });
+
                 let utv = UnsecureTemplateValues {
                     path: path_params.path.clone(),
                     token: token.clone(),
@@ -78,6 +96,7 @@ pub fn without_token<S: SessionStore, R: Renderer, T: TokenGenerator>(
                     edit: query_params.edit,
                     data_type: query_params.data_type,
                     relay_url: query_params.relay_url,
+                    js_message: sanitized_message,
                 };
                 Ok::<_, Rejection>((
                     Rendered::new(
@@ -197,6 +216,7 @@ pub fn with_token<S: SessionStore, R: Renderer, T: TokenGenerator, H: Storer>(
                             css: query_params.css,
                             edit: query_params.edit,
                             relay_url: query_params.relay_url,
+                            js_message: query_params.js_message,
                         }),
                     },
                 )?;
@@ -357,6 +377,7 @@ mod tests {
                         css: None,
                         edit: None,
                         relay_url: None,
+                        js_message: None,
                     });
                     template.value == expected_value
                 })
@@ -498,6 +519,7 @@ mod tests {
                         edit: None,
                         data_type: None,
                         relay_url: None,
+                        js_message: None
                     });
 
                     template.value == expected_value
@@ -544,6 +566,7 @@ mod tests {
                         edit: None,
                         data_type: None,
                         relay_url: None,
+                        js_message: None
                     });
 
                     template.value == expected_value
@@ -590,6 +613,7 @@ mod tests {
                         edit: Some(true),
                         data_type: None,
                         relay_url: None,
+                        js_message: None
                     });
                     template.value == expected_value
                 })
@@ -635,6 +659,7 @@ mod tests {
                         edit: Some(false),
                         data_type: None,
                         relay_url: None,
+                        js_message: None
                     });
                     template.value == expected_value
                 })
@@ -660,6 +685,103 @@ mod tests {
 
             let res = warp::test::request()
                 .path("/data/.testKey.?edit=false")
+                .reply(&without_token_filter)
+                .await;
+            assert_eq!(res.status(), 200);
+        }
+
+
+        #[tokio::test]
+        async fn test_without_token_with_js_message_valid() {
+            let js_message = "dXBkYXRl";
+
+            let session_store = MemoryStore::new();
+            let mut render_engine = MockRenderer::new();
+            render_engine
+                .expect_render()
+                .withf(move |template: &RenderTemplate| {
+                    let expected_value = TemplateValues::Unsecure(UnsecureTemplateValues {
+                        path: ".testKey.".to_owned(),
+                        token: "E0AE2C1C9AA2DB85DFA2FF6B4AAC7A5E51FFDAA3948BECEC353561D513E59A9C"
+                            .to_owned(),
+                        css: None,
+                        edit: Some(false),
+                        data_type: None,
+                        relay_url: None,
+                        js_message: Some(js_message.to_owned())
+                    });
+                    template.value == expected_value
+                })
+                .times(1)
+                .return_once(move |_| Ok("".to_string()));
+
+            let mut token_generator = MockTokenGenerator::new();
+            token_generator
+                .expect_generate_token()
+                .times(1)
+                .returning(|| {
+                    Ok(
+                        "E0AE2C1C9AA2DB85DFA2FF6B4AAC7A5E51FFDAA3948BECEC353561D513E59A9C"
+                            .to_owned(),
+                    )
+                });
+
+            let without_token_filter = get::without_token(
+                session_store,
+                Arc::new(render_engine),
+                Arc::new(token_generator),
+            );
+
+            let res = warp::test::request()
+                .path(&format!("/data/.testKey.?edit=false&js_message={}", js_message))
+                .reply(&without_token_filter)
+                .await;
+            assert_eq!(res.status(), 200);
+        }
+
+        #[tokio::test]
+        async fn test_without_token_with_js_message_invalid() {
+            let js_message = "invalid%5C%22%29%3B+mesaage%7D%7B";
+
+            let session_store = MemoryStore::new();
+            let mut render_engine = MockRenderer::new();
+            render_engine
+                .expect_render()
+                .withf(move |template: &RenderTemplate| {
+                    let expected_value = TemplateValues::Unsecure(UnsecureTemplateValues {
+                        path: ".testKey.".to_owned(),
+                        token: "E0AE2C1C9AA2DB85DFA2FF6B4AAC7A5E51FFDAA3948BECEC353561D513E59A9C"
+                            .to_owned(),
+                        css: None,
+                        edit: Some(false),
+                        data_type: None,
+                        relay_url: None,
+                        js_message: None
+                    });
+                    template.value == expected_value
+                })
+                .times(1)
+                .return_once(move |_| Ok("".to_string()));
+
+            let mut token_generator = MockTokenGenerator::new();
+            token_generator
+                .expect_generate_token()
+                .times(1)
+                .returning(|| {
+                    Ok(
+                        "E0AE2C1C9AA2DB85DFA2FF6B4AAC7A5E51FFDAA3948BECEC353561D513E59A9C"
+                            .to_owned(),
+                    )
+                });
+
+            let without_token_filter = get::without_token(
+                session_store,
+                Arc::new(render_engine),
+                Arc::new(token_generator),
+            );
+
+            let res = warp::test::request()
+                .path(&format!("/data/.testKey.?edit=false&js_message={}", js_message))
                 .reply(&without_token_filter)
                 .await;
             assert_eq!(res.status(), 200);
